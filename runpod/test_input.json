@@ -1,0 +1,11 @@
+{
+  "input": {
+    "audio_url": "https://github.com/librosa/data/raw/main/audio/198-209-0000.hq.ogg",
+    "mode": "both",
+    "nfe": 64,
+    "solver": "midpoint",
+    "tau": 0.5,
+    "denoise": true,
+    "output_format": "flac"
+  }
+}

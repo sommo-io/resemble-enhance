@@ -1,0 +1,5 @@
+*
+!resemble_enhance/
+!runpod/
+**/__pycache__
+resemble_enhance/model_repo
