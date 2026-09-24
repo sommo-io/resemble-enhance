@@ -27,9 +27,10 @@ Build locally from the repo root:
 docker buildx build --platform linux/amd64 -f runpod/Dockerfile -t <image> --push .
 ```
 
-The base image is a build arg (`BASE_IMAGE`, default `pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime`).
-PyTorch 2.4 doesn't support Blackwell GPUs (RTX 50xx, RTX PRO 4500/6000, including their MIG slices),
-so leave those out of the endpoint's GPU list.
+The base image is a build arg (`BASE_IMAGE`, default `pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime`).
+PyTorch 2.7 / CUDA 12.8 supports Blackwell (RTX 50xx, RTX PRO 4500/6000 and their MIG slices) as well as
+Ampere/Ada, so any GPU pool works. Images up to v1.0.0 were built on PyTorch 2.4 and don't run on Blackwell.
+Hosts need a driver for CUDA 12.8+.
 
 ## Deploy
 

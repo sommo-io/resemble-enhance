@@ -4,7 +4,8 @@
 #
 # Everything RunPod-specific lives in runpod/; upstream files are untouched so the fork can
 # keep merging resemble-ai/resemble-enhance cleanly.
-ARG BASE_IMAGE=pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+# 2.7 / CUDA 12.8 is the first stack with Blackwell (sm_120) kernels; older GPUs keep working.
+ARG BASE_IMAGE=pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
 FROM ${BASE_IMAGE}
 
 ENV PYTHONUNBUFFERED=1 \
