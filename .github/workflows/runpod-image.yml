@@ -3,6 +3,7 @@ name: runpod-image
 on:
   push:
     branches: [main]
+    tags: ["v*"]  # path filters don't apply to tag pushes
     paths: [resemble_enhance/**, runpod/**, .github/workflows/runpod-image.yml]
   workflow_dispatch:
 
@@ -34,12 +35,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # main -> :latest, :<sha>; tag v1.2.3 -> :v1.2.3, :v1.2, :v1
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long,prefix=
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: runpod/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -19,6 +19,7 @@ image and deepspeed's build toolchain. The image build loads the model once on C
 
 Every push to `main` that touches `resemble_enhance/` or `runpod/` builds
 `ghcr.io/sommo-io/resemble-enhance:latest` (and `:<commit sha>`) via GitHub Actions.
+Pushing a tag like `v1.2.3` builds `:v1.2.3`, `:v1.2` and `:v1`; pin endpoints to one of those.
 
 Build locally from the repo root:
 
