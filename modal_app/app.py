@@ -26,9 +26,10 @@ import time
 
 import modal
 
-# L4 first; A10 (same 24 GB, pricier) when no L4 is free, instead of waiting for L4 capacity.
-# Memory snapshots are per GPU type, so the first A10 container builds its own.
-GPU = ["L4", "A10"]
+# Tried in order when a container starts: L4 (~$0.80/h), then A10 (~$1.10/h, same 24 GB), then
+# L40S (~$1.95/h, often free) instead of waiting minutes for L4/A10 capacity.
+# Memory snapshots are per GPU type, so the first container on each type builds its own.
+GPU = ["L4", "A10", "L40S"]
 MODEL_DIR = "/models/enhancer_stage2"
 
 app = modal.App("resemble-enhance")
