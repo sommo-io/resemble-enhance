@@ -15,7 +15,7 @@ import time
 import modal
 
 app_name = sys.argv[1] if len(sys.argv) > 1 else "resemble-enhance"
-containers = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+containers = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 
 enhancer = modal.Cls.from_name(app_name, "Enhancer")()
 

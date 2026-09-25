@@ -5,4 +5,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 modal deploy modal_app/app.py
-uv run --quiet --no-project --with modal python modal_app/warmup.py "resemble-enhance" "${WARMUP_CONTAINERS:-6}"
+uv run --quiet --no-project --with modal python modal_app/warmup.py "resemble-enhance" "${WARMUP_CONTAINERS:-5}"

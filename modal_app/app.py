@@ -26,7 +26,9 @@ import time
 
 import modal
 
-GPU = "L4"
+# L4 first; A10 (same 24 GB, pricier) when no L4 is free, instead of waiting for L4 capacity.
+# Memory snapshots are per GPU type, so the first A10 container builds its own.
+GPU = ["L4", "A10"]
 MODEL_DIR = "/models/enhancer_stage2"
 
 app = modal.App("resemble-enhance")
@@ -76,7 +78,9 @@ image = (
     # Keep an idle container 2 min: requests often come in bursts (preview, then the full file),
     # and a cold start costs ~10-25 s. Idle time is billed (~$0.016/min).
     scaledown_window=120,
-    max_containers=10,
+    # The workspace GPU limit (10 on Starter) is shared with the demucs app and split 5/5; idle
+    # warm containers keep their slot, so one app could otherwise starve the other.
+    max_containers=5,
     enable_memory_snapshot=True,
 )
 class Enhancer:
@@ -136,8 +140,11 @@ class Enhancer:
         container busy so the parallel calls land on separate containers."""
         import os
 
+        import torch
+
         time.sleep(hold_seconds)
-        return {"task": os.environ.get("MODAL_TASK_ID"), "device": self.handler.DEVICE}
+        gpu = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
+        return {"task": os.environ.get("MODAL_TASK_ID"), "device": gpu}
 
     @modal.method()
     def enhance(self, job_id: str, inp: dict, submitted_at: float) -> dict:
