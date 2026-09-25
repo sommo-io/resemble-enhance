@@ -10,7 +10,7 @@ HTTP API (Modal proxy auth: send Modal-Key / Modal-Secret headers from a proxy a
     POST /runsync        same body; waits up to 90 s  -> finished body, or {"id", "status": "IN_PROGRESS"}
     GET  /status/{id}                                  -> {"id", "status", "output" | "error"}
     POST /cancel/{id}                                  -> {"id", "status": "CANCELLED"}
-status is IN_PROGRESS (queued or running), COMPLETED or FAILED.
+status is IN_QUEUE, IN_PROGRESS (a worker picked it up), COMPLETED, FAILED, CANCELLED or TIMED_OUT.
 
 With "webhook", the finished /status body is POSTed there, signed with WEBHOOK_SECRET from the
 Modal secret "audio-webhook" (see _send_webhook). Same contract as the demucs app.
@@ -28,6 +28,10 @@ GPU = "L4"
 MODEL_DIR = "/models/enhancer_stage2"
 
 app = modal.App("resemble-enhance")
+
+# call id -> start time, written when a worker picks the job up, so /status can tell
+# IN_QUEUE from IN_PROGRESS (Modal itself only knows "not finished yet").
+started = modal.Dict.from_name("resemble-enhance-started", create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -104,7 +108,8 @@ class Enhancer:
 
         import torch
 
-        started = time.time()
+        started_at = time.time()
+        started[modal.current_function_call_id()] = started_at
         torch.cuda.reset_peak_memory_stats()
         try:
             out = self.handler.handler({"id": job_id, "input": inp})
@@ -112,8 +117,8 @@ class Enhancer:
             if webhook:
                 _send_webhook(webhook, {"id": modal.current_function_call_id(), "status": "FAILED", "error": f"{type(e).__name__}: {e}"})
             raise
-        out["queue_seconds"] = round(started - submitted_at, 3)
-        out["total_seconds"] = round(time.time() - started, 3)
+        out["queue_seconds"] = round(started_at - submitted_at, 3)
+        out["total_seconds"] = round(time.time() - started_at, 3)
         out["peak_ram_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
         out["peak_gpu_mb"] = torch.cuda.max_memory_allocated() // 2**20
         if webhook:
@@ -126,6 +131,17 @@ def _status_body(call_id: str, out) -> dict:
     if isinstance(out, dict) and "error" in out:
         return {"id": call_id, "status": "FAILED", "error": out["error"]}
     return {"id": call_id, "status": "COMPLETED", "output": out}
+
+
+def _error_status(call_id: str, e: Exception) -> dict:
+    """Map an exception from FunctionCall.get to a RunPod-style terminal status."""
+    if isinstance(e, modal.exception.FunctionTimeoutError):
+        status = "TIMED_OUT"
+    elif "cancelled" in str(e).lower():  # a cancelled call surfaces as RemoteError("Function call was cancelled ...")
+        status = "CANCELLED"
+    else:
+        status = "FAILED"
+    return {"id": call_id, "status": status, "error": f"{type(e).__name__}: {e}"}
 
 
 def _send_webhook(url: str, body: dict) -> None:
@@ -189,22 +205,24 @@ def api():
         call = await spawn(body)
         try:
             out = await call.get.aio(timeout=90)
-        except (TimeoutError, modal.exception.TimeoutError):
-            return {"id": call.object_id, "status": "IN_PROGRESS"}
+        except TimeoutError:  # builtin: not finished within 90 s (a job timeout is FunctionTimeoutError)
+            running = await started.contains.aio(call.object_id)
+            return {"id": call.object_id, "status": "IN_PROGRESS" if running else "IN_QUEUE"}
         except Exception as e:
-            return {"id": call.object_id, "status": "FAILED", "error": f"{type(e).__name__}: {e}"}
+            return _error_status(call.object_id, e)
         return _status_body(call.object_id, out)
 
     @web.get("/status/{call_id}")
     async def status(call_id: str):
         try:
             out = await modal.FunctionCall.from_id(call_id).get.aio(timeout=0)
-        except (TimeoutError, modal.exception.TimeoutError):
-            return {"id": call_id, "status": "IN_PROGRESS"}
+        except TimeoutError:  # builtin: not finished yet (a job timeout is FunctionTimeoutError, handled below)
+            running = await started.contains.aio(call_id)
+            return {"id": call_id, "status": "IN_PROGRESS" if running else "IN_QUEUE"}
         except modal.exception.NotFoundError:
             raise HTTPException(404, "job not found")
         except Exception as e:  # the call itself raised (crash, timeout, cancel)
-            return {"id": call_id, "status": "FAILED", "error": f"{type(e).__name__}: {e}"}
+            return _error_status(call_id, e)
         return _status_body(call_id, out)
 
     @web.post("/cancel/{call_id}")
