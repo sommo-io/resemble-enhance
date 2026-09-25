@@ -12,8 +12,10 @@ HTTP API (Modal proxy auth: send Modal-Key / Modal-Secret headers from a proxy a
     POST /cancel/{id}                                  -> {"id", "status": "CANCELLED"}
 status is IN_QUEUE, IN_PROGRESS (a worker picked it up), COMPLETED, FAILED, CANCELLED or TIMED_OUT.
 
-With "webhook", the finished /status body is POSTed there, signed with WEBHOOK_SECRET from the
-Modal secret "audio-webhook" (see _send_webhook). Same contract as the demucs app.
+With "webhook", the final /status body is POSTed there for every terminal status (COMPLETED,
+FAILED, CANCELLED, TIMED_OUT), signed with WEBHOOK_SECRET from the Modal secret "audio-webhook";
+delivery is done by the `watch` function and retried for ~12 min (see _send_webhook).
+Same contract as the demucs app.
 
 GCS upload uses the same env vars as RunPod, all from Modal secrets (nothing deployment-specific is
 kept in this public repo): "demucs-gcs" holds GCS_SERVICE_ACCOUNT_JSON, "resemble-enhance-config" holds
@@ -103,7 +105,7 @@ class Enhancer:
         print(f"model moved to {device} in {time.perf_counter() - t0:.2f}s")
 
     @modal.method()
-    def enhance(self, job_id: str, inp: dict, submitted_at: float, webhook: str | None = None) -> dict:
+    def enhance(self, job_id: str, inp: dict, submitted_at: float) -> dict:
         import resource
 
         import torch
@@ -111,18 +113,11 @@ class Enhancer:
         started_at = time.time()
         started[modal.current_function_call_id()] = started_at
         torch.cuda.reset_peak_memory_stats()
-        try:
-            out = self.handler.handler({"id": job_id, "input": inp})
-        except Exception as e:
-            if webhook:
-                _send_webhook(webhook, {"id": modal.current_function_call_id(), "status": "FAILED", "error": f"{type(e).__name__}: {e}"})
-            raise
+        out = self.handler.handler({"id": job_id, "input": inp})
         out["queue_seconds"] = round(started_at - submitted_at, 3)
         out["total_seconds"] = round(time.time() - started_at, 3)
         out["peak_ram_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
         out["peak_gpu_mb"] = torch.cuda.max_memory_allocated() // 2**20
-        if webhook:
-            _send_webhook(webhook, _status_body(modal.current_function_call_id(), out))
         return out
 
 
@@ -145,7 +140,7 @@ def _error_status(call_id: str, e: Exception) -> dict:
 
 
 def _send_webhook(url: str, body: dict) -> None:
-    """POST body to url, signed with WEBHOOK_SECRET; retries 3x, never raises.
+    """POST body to url, signed with WEBHOOK_SECRET; 5 attempts over ~12 min, never raises.
 
     Headers: X-Webhook-Timestamp: <unix seconds>
              X-Webhook-Signature: v1=<hex HMAC-SHA256(secret, f"{timestamp}.{raw body}")>
@@ -158,7 +153,7 @@ def _send_webhook(url: str, body: dict) -> None:
     import requests
 
     raw = json.dumps(body, separators=(",", ":")).encode()
-    for attempt, delay in enumerate((0, 2, 10)):
+    for attempt, delay in enumerate((0, 5, 30, 120, 600)):
         time.sleep(delay)
         ts = str(int(time.time()))
         sig = hmac.new(os.environ["WEBHOOK_SECRET"].encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
@@ -173,7 +168,25 @@ def _send_webhook(url: str, body: dict) -> None:
     print(f"webhook to {url} failed; the result is still available via /status")
 
 
-web_image = modal.Image.debian_slim(python_version="3.11").pip_install("fastapi[standard]")
+web_image = modal.Image.debian_slim(python_version="3.11").pip_install("fastapi[standard]", "requests")
+
+
+@app.function(image=web_image, secrets=[modal.Secret.from_name("audio-webhook")], timeout=6 * 3600)
+@modal.concurrent(max_inputs=1000)
+async def watch(call_id: str, webhook: str) -> None:
+    """Wait for a job to reach ANY terminal state and deliver the webhook.
+
+    Runs outside the GPU worker, so timeouts, crashes and cancellations still produce a
+    webhook (TIMED_OUT / FAILED / CANCELLED), like RunPod's platform-side webhooks.
+    Only waits, so one small CPU container serves many jobs at once.
+    """
+    import asyncio
+
+    try:
+        body = _status_body(call_id, await modal.FunctionCall.from_id(call_id).get.aio())
+    except Exception as e:
+        body = _error_status(call_id, e)
+    await asyncio.to_thread(_send_webhook, webhook, body)
 
 
 @app.function(image=web_image)
@@ -192,7 +205,10 @@ def api():
         webhook = body.get("webhook")
         if webhook is not None and not (isinstance(webhook, str) and webhook.startswith("https://")):
             raise HTTPException(400, "webhook must be an https:// URL")
-        return await Enhancer().enhance.spawn.aio(uuid.uuid4().hex, inp, time.time(), webhook)
+        call = await Enhancer().enhance.spawn.aio(uuid.uuid4().hex, inp, time.time())
+        if webhook:
+            await watch.spawn.aio(call.object_id, webhook)
+        return call
 
     @web.post("/run")
     async def run(body: dict):
