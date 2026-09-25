@@ -38,6 +38,7 @@ import os
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import runpod
@@ -164,15 +165,21 @@ def handler(job):
     t0 = time.perf_counter()
     out = {"format": fmt, "duration": round(dwav.shape[-1] / sr, 3)}
 
+    # Encode + upload runs in a thread (soundfile and the GCS client release the GIL), so in
+    # "both" mode the denoised file is written while the GPU works on the enhanced one.
     try:
-        if mode in ("denoise", "both"):
-            wav, new_sr = denoise(dwav, sr, DEVICE, run_dir=MODEL_DIR)
-            out["denoised"] = _encode(wav.cpu(), new_sr, fmt, job_id, "denoised", gcs)
-        if mode in ("enhance", "both"):
-            wav, new_sr = enhance(
-                dwav, sr, DEVICE, nfe=nfe, solver=solver, lambd=lambd, tau=tau, run_dir=MODEL_DIR
-            )
-            out["enhanced"] = _encode(wav.cpu(), new_sr, fmt, job_id, "enhanced", gcs)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = {}
+            if mode in ("denoise", "both"):
+                wav, new_sr = denoise(dwav, sr, DEVICE, run_dir=MODEL_DIR)
+                pending["denoised"] = pool.submit(_encode, wav.cpu(), new_sr, fmt, job_id, "denoised", gcs)
+            if mode in ("enhance", "both"):
+                wav, new_sr = enhance(
+                    dwav, sr, DEVICE, nfe=nfe, solver=solver, lambd=lambd, tau=tau, run_dir=MODEL_DIR
+                )
+                pending["enhanced"] = pool.submit(_encode, wav.cpu(), new_sr, fmt, job_id, "enhanced", gcs)
+            for name, fut in pending.items():
+                out[name] = fut.result()
     except AssertionError as e:  # upstream validates params with asserts
         return {"error": str(e)}
     finally:
