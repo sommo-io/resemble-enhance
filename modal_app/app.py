@@ -87,7 +87,30 @@ class Enhancer:
         import handler
 
         self.handler = handler
-        print(f"model loaded on cpu in {time.perf_counter() - t0:.2f}s")
+        # One tiny CPU pass (denoise + enhance on 1 s of silence) so every lazy import happens now
+        # and lands in the snapshot. Otherwise the first request does them; a cancel mid-import
+        # leaves a module half-initialized and every later request in that container fails.
+        import torch
+        import torch._dynamo  # noqa: F401
+        from resemble_enhance.enhancer.inference import denoise, enhance
+
+        silence = torch.zeros(44100)
+        denoise(silence, 44100, "cpu", run_dir=MODEL_DIR)
+        enhance(silence, 44100, "cpu", nfe=1, run_dir=MODEL_DIR)
+        # Same for the request path around the model: torchaudio's decode backend and the GCS client.
+        import tempfile
+
+        import soundfile as sf
+        import torchaudio
+
+        with tempfile.NamedTemporaryFile(suffix=".mp3") as f:
+            sf.write(f.name, silence.numpy(), 44100, format="MP3")
+            torchaudio.load(f.name)
+        try:
+            handler._gcs()
+        except Exception as e:  # no credentials configured: uploads fall back to S3/base64
+            print(f"GCS client not created: {e}")
+        print(f"model loaded and warmed on cpu in {time.perf_counter() - t0:.2f}s")
 
     @modal.enter(snap=False)
     def load_gpu(self):
@@ -113,7 +136,14 @@ class Enhancer:
         started_at = time.time()
         started[modal.current_function_call_id()] = started_at
         torch.cuda.reset_peak_memory_stats()
-        out = self.handler.handler({"id": job_id, "input": inp})
+        try:
+            out = self.handler.handler({"id": job_id, "input": inp})
+        except (AttributeError, ImportError) as e:
+            if "partially initialized module" in str(e) or isinstance(e, ImportError):
+                # Module state is corrupt (e.g. an import interrupted by a cancel): stop taking
+                # inputs so Modal replaces this container instead of failing every job on it.
+                modal.experimental.stop_fetching_inputs()
+            raise
         out["queue_seconds"] = round(started_at - submitted_at, 3)
         out["total_seconds"] = round(time.time() - started_at, 3)
         out["peak_ram_mb"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
@@ -190,6 +220,7 @@ async def watch(call_id: str, webhook: str) -> None:
 
 
 @app.function(image=web_image)
+@modal.concurrent(max_inputs=100)  # requests only enqueue/poll/wait, so one container serves many
 @modal.asgi_app(requires_proxy_auth=True)
 def api():
     import uuid
@@ -228,14 +259,19 @@ def api():
             return _error_status(call.object_id, e)
         return _status_body(call.object_id, out)
 
+    def check_id(call_id: str) -> None:
+        if not call_id.startswith("fc-"):  # Modal raises ExecutionError, not NotFound, for these
+            raise HTTPException(404, "job not found")
+
     @web.get("/status/{call_id}")
     async def status(call_id: str):
+        check_id(call_id)
         try:
             out = await modal.FunctionCall.from_id(call_id).get.aio(timeout=0)
         except TimeoutError:  # builtin: not finished yet (a job timeout is FunctionTimeoutError, handled below)
             running = await started.contains.aio(call_id)
             return {"id": call_id, "status": "IN_PROGRESS" if running else "IN_QUEUE"}
-        except modal.exception.NotFoundError:
+        except (modal.exception.NotFoundError, modal.exception.InvalidError):
             raise HTTPException(404, "job not found")
         except Exception as e:  # the call itself raised (crash, timeout, cancel)
             return _error_status(call_id, e)
@@ -243,7 +279,11 @@ def api():
 
     @web.post("/cancel/{call_id}")
     async def cancel(call_id: str):
-        await modal.FunctionCall.from_id(call_id).cancel.aio()
+        check_id(call_id)
+        try:
+            await modal.FunctionCall.from_id(call_id).cancel.aio()
+        except (modal.exception.NotFoundError, modal.exception.InvalidError):
+            raise HTTPException(404, "job not found")
         return {"id": call_id, "status": "CANCELLED"}
 
     return web
