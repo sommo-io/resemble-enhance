@@ -130,6 +130,16 @@ class Enhancer:
         print(f"model moved to {device} in {time.perf_counter() - t0:.2f}s")
 
     @modal.method()
+    def warmup(self, hold_seconds: float = 0) -> dict:
+        """Start a container (building a memory snapshot if its worker type has none) without
+        touching storage. deploy.sh calls it in parallel after each deploy; hold_seconds keeps the
+        container busy so the parallel calls land on separate containers."""
+        import os
+
+        time.sleep(hold_seconds)
+        return {"task": os.environ.get("MODAL_TASK_ID"), "device": self.handler.DEVICE}
+
+    @modal.method()
     def enhance(self, job_id: str, inp: dict, submitted_at: float) -> dict:
         import resource
 

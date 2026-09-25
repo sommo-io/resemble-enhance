@@ -4,8 +4,13 @@ Runs the same worker as RunPod (`runpod/handler.py`, same input/output) on Modal
 queue API. Upstream files stay untouched, like `runpod/`.
 
 ```bash
-modal deploy modal_app/app.py     # from the repo root; app "resemble-enhance"
+modal_app/deploy.sh     # modal deploy + pre-build memory snapshots (needs modal CLI and uv)
 ```
+
+`deploy.sh` runs `modal deploy modal_app/app.py`, then `warmup.py`, which starts 6 containers in
+parallel through the `warmup` method (no storage writes). Modal keeps 2-3 memory snapshots per GPU
+type and builds each lazily on the first container of that worker type (+30-40 s for that request),
+so this moves that cost off real requests. Coverage isn't guaranteed, and a warm-up costs ~5 GPU-minutes.
 
 Keep this directory out of a folder named `modal` (it would shadow the `modal` package).
 
