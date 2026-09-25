@@ -73,7 +73,9 @@ image = (
              modal.Secret.from_name("audio-webhook")],
     # enhance on a 40-min file takes several minutes on an L4.
     timeout=1800,
-    scaledown_window=30,
+    # Keep an idle container 2 min: requests often come in bursts (preview, then the full file),
+    # and a cold start costs ~10-25 s. Idle time is billed (~$0.016/min).
+    scaledown_window=120,
     max_containers=10,
     enable_memory_snapshot=True,
 )

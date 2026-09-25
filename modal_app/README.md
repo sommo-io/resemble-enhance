@@ -34,7 +34,7 @@ out = enhancer.enhance.remote("job-id", {"audio_url": "...", "mode": "enhance", 
 
 ## Setup
 
-- GPU L4, 2 CPU, 10 GB RAM reserved (peak ~6.5 GB on a 40-min file), timeout 30 min, scale to zero after 30 s idle, max 10 containers.
+- GPU L4, 2 CPU, 10 GB RAM reserved (peak ~6.5 GB on a 40-min file), timeout 30 min, scale to zero after 2 min idle, max 10 containers.
 - Memory snapshot: imports and the CPU model load are snapshotted; a new container restores it and only
   moves the model to the GPU (~1 s). `load_enhancer` is swapped for the restored model so nothing reloads.
 - GCS output is configured only through Modal secrets, so no bucket names live in this public repo:
